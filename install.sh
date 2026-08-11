@@ -70,6 +70,38 @@ check_and_install_deps() {
     echo "Dependencies installed."
 }
 
+setup_pass() {
+    if [[ -f "${HOME}/.password-store/.gpg-id" ]]; then
+        echo "pass already initialized."
+        return
+    fi
+
+    echo ""
+    echo "=== Setting up pass (password store) ==="
+
+    local gpg_id
+    gpg_id=$(gpg --list-keys --with-colons 2>/dev/null | awk -F: '/^uid/{print $10; exit}')
+
+    if [[ -z "${gpg_id}" ]]; then
+        echo "No GPG key found. Creating one..."
+        echo "You will be asked for your name, email, and a passphrase."
+        echo ""
+        gpg --full-generate-key
+        gpg_id=$(gpg --list-keys --with-colons 2>/dev/null | awk -F: '/^uid/{print $10; exit}')
+    fi
+
+    if [[ -z "${gpg_id}" ]]; then
+        echo "Error: GPG key creation failed." >&2
+        echo "Create one manually: gpg --full-generate-key" >&2
+        echo "Then run: pass init \"your-email@example.com\"" >&2
+        exit 1
+    fi
+
+    echo "Initializing pass with GPG ID: ${gpg_id}"
+    pass init "${gpg_id}"
+    echo "pass initialized."
+}
+
 install_sshpm() {
     mkdir -p "${INSTALL_DIR}"
     cp "${SCRIPT_DIR}/sshpm" "${INSTALL_DIR}/sshpm"
@@ -98,6 +130,8 @@ echo "=== sshpm installer ==="
 echo ""
 
 check_and_install_deps
+echo ""
+setup_pass
 echo ""
 install_sshpm
 ensure_path
