@@ -185,6 +185,18 @@ __version__ = "1.0.0"
 
 REPO = "omryatia/sshpm"
 RELEASE_URL = f"https://github.com/{REPO}/releases/latest/download/sshpm"
+LATEST_API = f"https://api.github.com/repos/{REPO}/releases/latest"
+
+
+def get_latest_version():
+    import urllib.request
+    try:
+        req = urllib.request.Request(LATEST_API, headers={"Accept": "application/vnd.github.v3+json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+            return data["tag_name"].lstrip("v")
+    except Exception:
+        return None
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "sshpm"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -488,7 +500,7 @@ complete -F _sshpm_completions sshpm
     print("  sshpm connect <TAB>")
 
 
-def cmd_self_update(args):
+def cmd_self_update():
     import shutil
     import stat
     import tempfile
@@ -497,14 +509,9 @@ def cmd_self_update(args):
     print(f"Current version: {__version__}")
     print("Checking for updates...")
 
-    try:
-        tag_url = f"https://api.github.com/repos/{REPO}/releases/latest"
-        req = urllib.request.Request(tag_url, headers={"Accept": "application/vnd.github.v3+json"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-            latest = data["tag_name"].lstrip("v")
-    except Exception as e:
-        print(f"Error checking latest version: {e}", file=sys.stderr)
+    latest = get_latest_version()
+    if not latest:
+        print("Error: could not check latest version.", file=sys.stderr)
         sys.exit(1)
 
     if latest == __version__:
@@ -537,8 +544,9 @@ def build_parser():
         prog="sshpm",
         description="SSH Profile Manager using pass for password storage."
     )
-    parser.add_argument("--version", action="version", version=f"sshpm {__version__}")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--version", action="store_true", help="Show current and latest version")
+    parser.add_argument("--update", action="store_true", help="Update sshpm to the latest release")
+    sub = parser.add_subparsers(dest="command")
 
     # add
     p_add = sub.add_parser("add", help="Add a new profile")
@@ -599,16 +607,33 @@ def build_parser():
     p_comp_install.add_argument("--install", action="store_true", help="Install completion script")
     p_comp_install.set_defaults(func=lambda args: cmd_completion(args) if args.install else print("Use: sshpm completion --install"))
 
-    # self-update
-    p_update_self = sub.add_parser("self-update", help="Update sshpm to the latest release")
-    p_update_self.set_defaults(func=cmd_self_update)
-
     return parser
 
 
 def main():
     parser = build_parser()
     args = parser.parse_args()
+
+    if args.version:
+        latest = get_latest_version()
+        print(f"sshpm {__version__}")
+        if latest:
+            if latest == __version__:
+                print(f"latest {latest} (up to date)")
+            else:
+                print(f"latest {latest} (run sshpm --update)")
+        else:
+            print("latest: unknown (could not reach GitHub)")
+        return
+
+    if args.update:
+        cmd_self_update()
+        return
+
+    if not args.command:
+        parser.print_help()
+        return
+
     args.func(args)
 
 
