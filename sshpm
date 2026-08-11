@@ -1,0 +1,616 @@
+#!/usr/bin/env python3
+"""
+sshpm - SSH Profile Manager using `pass` (password-store) and `sshpass`.
+
+====================================================
+1. PREREQUISITES
+====================================================
+
+On Ubuntu / Debian:
+
+    sudo apt update
+    sudo apt install -y pass sshpass gpg
+
+On RHEL / CentOS / Fedora:
+
+    sudo dnf install -y pass sshpass gnupg2
+
+----------------------------------------------------
+1.1 Create a GPG key (if you don't have one)
+----------------------------------------------------
+
+Check existing keys:
+
+    gpg --list-keys
+
+If nothing appears, create one:
+
+    gpg --full-generate-key
+
+Choose:
+- Key type: RSA and RSA, or ECC
+- Key size: default is fine (e.g. 3072)
+- Expiration: 0 = does not expire
+- Enter your name and email (e.g. "Test User", "test@example.com")
+- Set a passphrase
+
+Then check again:
+
+    gpg --list-keys
+
+You should see something like:
+
+    pub   rsa3072 2025-02-20 [SC]
+          ABCD1234EF5678901234567890ABCDEF12345678
+    uid           [ultimate] Test User <test@example.com>
+
+You can use either the EMAIL (test@example.com) or the FINGERPRINT
+(ABCD1234EF5678901234567890ABCDEF12345678) as the ID for `pass`.
+
+----------------------------------------------------
+1.2 Initialize `pass` with your real GPG ID
+----------------------------------------------------
+
+If you previously mis-initialized `pass`, reset it (safe if empty/broken):
+
+    rm -rf ~/.password-store
+
+Then initialize with your REAL GPG ID (email or fingerprint). For example:
+
+    pass init "test@example.com"
+
+or:
+
+    pass init ABCD1234EF5678901234567890ABCDEF12345678
+
+Test it:
+
+    pass insert test/password
+    # type: foo
+    # confirm: foo
+
+    pass show test/password
+    # should print: foo
+
+If this works, `pass` + GPG are fine.
+
+====================================================
+2. INSTALLING sshpm
+====================================================
+
+1. Save this file as:
+
+    ~/bin/sshpm
+
+2. Make it executable:
+
+    chmod +x ~/bin/sshpm
+
+3. Make sure ~/bin is in your PATH. Add to ~/.bashrc or ~/.zshrc:
+
+    export PATH="$HOME/bin:$PATH"
+
+Then reload:
+
+    source ~/.bashrc      # or source ~/.zshrc
+
+Now you can run:
+
+    sshpm --help
+
+====================================================
+3. USAGE
+====================================================
+
+----------------------------------------------------
+3.1 Add a new profile (creates profile + pass entry)
+----------------------------------------------------
+
+Example:
+
+    sshpm add test-server-prod \
+        --host 127.0.0.1 \
+        --user test-user \
+        --port 22 \
+        --password 'NewPass123!'
+
+This will:
+- Create profile "test-server-prod" in ~/.config/sshpm/config.json
+- Store the password in pass entry: servers/test-server-prod
+
+----------------------------------------------------
+3.2 Update existing profile (and create/update pass)
+----------------------------------------------------
+
+Change password or connection details:
+
+    sshpm update test-server-prod --password 'NewPass123!'
+    sshpm update test-server-prod --host 127.0.0.1 --port 22
+
+If --password is given, sshpm will create/update the pass entry for that profile.
+
+----------------------------------------------------
+3.3 Connect to a server
+----------------------------------------------------
+
+    sshpm connect test-server-prod
+
+What it does:
+- Reads profile from ~/.config/sshpm/config.json
+- Reads password from pass (servers/test-server-prod)
+- Sets SSHPASS env and runs: sshpass -e ssh user@host -p port
+
+----------------------------------------------------
+3.4 List, show profile, show password, delete
+----------------------------------------------------
+
+List all profiles:
+
+    sshpm list
+
+Show details of a profile (host/user/port/pass entry):
+
+    sshpm show test-server-prod
+
+Show the password stored in pass for that profile:
+
+    sshpm show-pass test-server-prod
+    # equivalent to: pass show servers/test-server-prod
+
+Delete a profile (does NOT delete pass entry):
+
+    sshpm delete test-server-prod
+
+====================================================
+4. NOTES
+====================================================
+
+- Passwords are encrypted and stored via `pass` + GPG on your machine.
+- `sshpm` only orchestrates: config in ~/.config/sshpm/config.json
+  and secrets in ~/.password-store via `pass`.
+- For passwords with special characters (!, $, etc), ALWAYS quote them:
+
+    --password 'MyP@ssw0rd!'
+
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+__version__ = "1.0.0"
+
+REPO = "omryatia/sshpm"
+RELEASE_URL = f"https://github.com/{REPO}/releases/latest/download/sshpm"
+
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "sshpm"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+
+
+def load_config():
+    if not CONFIG_FILE.exists():
+        return {"profiles": {}}
+    with CONFIG_FILE.open("r", encoding="utf-8") as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            print(f"Error: config file {CONFIG_FILE} is corrupted.", file=sys.stderr)
+            sys.exit(1)
+
+
+def save_config(cfg):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with CONFIG_FILE.open("w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+
+
+# ---------- commands ----------
+
+def cmd_add(args):
+    cfg = load_config()
+    profiles = cfg.setdefault("profiles", {})
+
+    name = args.name
+    if name in profiles:
+        print(f"Error: profile '{name}' already exists.", file=sys.stderr)
+        print("Use `sshpm update` to modify it, or `sshpm delete` to remove it first.", file=sys.stderr)
+        sys.exit(1)
+
+    host = args.host or input("Host (IP / hostname): ").strip()
+    user = args.user or input("User: ").strip()
+    port = args.port or input("Port [22]: ").strip() or "22"
+
+    # If user provided a password, generate pass-entry automatically
+    if args.password:
+        pass_entry = f"servers/{name}"
+    else:
+        pass_entry = args.pass_entry or input("pass entry (e.g. servers/myserver): ").strip()
+
+    profiles[name] = {
+        "host": host,
+        "user": user,
+        "port": int(port),
+        "pass_entry": pass_entry,
+    }
+    save_config(cfg)
+
+    # Insert password into pass if provided
+    if args.password:
+        print(f"Inserting password into pass entry '{pass_entry}'...")
+        try:
+            pw_input = args.password + "\n" + args.password + "\n"
+            subprocess.run(
+                ["pass", "insert", "--force", pass_entry],
+                input=pw_input,
+                text=True,
+                check=True,
+            )
+            print("Password saved successfully.")
+        except subprocess.CalledProcessError:
+            print("Error: failed to insert password into pass.", file=sys.stderr)
+            print("You can add it manually with:", file=sys.stderr)
+            print(f"  pass insert {pass_entry}", file=sys.stderr)
+
+    print(f"Saved profile '{name}'")
+
+
+def cmd_update(args):
+    cfg = load_config()
+    profiles = cfg.get("profiles", {})
+    p = profiles.get(args.name)
+    if not p:
+        print(f"Profile '{args.name}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    if args.host:
+        p["host"] = args.host
+    if args.user:
+        p["user"] = args.user
+    if args.port:
+        p["port"] = args.port
+    if args.pass_entry:
+        p["pass_entry"] = args.pass_entry
+
+    save_config(cfg)
+    print(f"Updated profile '{args.name}'")
+
+    # If password provided, create/update pass entry (even if it didn't exist before)
+    if args.password:
+        pass_entry = p["pass_entry"]
+        print(f"Setting password in pass entry '{pass_entry}'...")
+        try:
+            pw_input = args.password + "\n" + args.password + "\n"
+            subprocess.run(
+                ["pass", "insert", "--force", pass_entry],
+                input=pw_input,
+                text=True,
+                check=True,
+            )
+            print("Password stored/updated successfully.")
+        except subprocess.CalledProcessError:
+            print("Error: failed to write password into pass.", file=sys.stderr)
+            print("You can set it manually with:", file=sys.stderr)
+            print(f"  pass insert {pass_entry}", file=sys.stderr)
+
+
+def cmd_list(args):
+    cfg = load_config()
+    profiles = cfg.get("profiles", {})
+    if not profiles:
+        print("No profiles defined yet.")
+        return
+    print("Defined profiles:")
+    for name, p in profiles.items():
+        print(f"- {name}: {p['user']}@{p['host']}:{p['port']} (pass: {p['pass_entry']})")
+
+
+def cmd_show(args):
+    cfg = load_config()
+    p = cfg.get("profiles", {}).get(args.name)
+    if not p:
+        print(f"Profile '{args.name}' not found.", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps(p, indent=2))
+
+
+def cmd_delete(args):
+    cfg = load_config()
+    profiles = cfg.get("profiles", {})
+    if args.name not in profiles:
+        print(f"Profile '{args.name}' not found.", file=sys.stderr)
+        sys.exit(1)
+    del profiles[args.name]
+    save_config(cfg)
+    print(f"Deleted profile '{args.name}'")
+
+
+def get_password_from_pass(entry: str) -> str:
+    try:
+        out = subprocess.check_output(
+            ["pass", entry],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except subprocess.CalledProcessError:
+        print(f"Error: could not retrieve password from `pass` entry '{entry}'.", file=sys.stderr)
+        print("Make sure to create it with:", file=sys.stderr)
+        print(f"  pass insert {entry}", file=sys.stderr)
+        sys.exit(1)
+    return out.splitlines()[0].strip()
+
+
+def cmd_connect(args):
+    cfg = load_config()
+    p = cfg.get("profiles", {}).get(args.name)
+    if not p:
+        print(f"Profile '{args.name}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    host = p["host"]
+    user = p["user"]
+    port = str(p.get("port", 22))
+    pass_entry = p["pass_entry"]
+
+    password = get_password_from_pass(pass_entry)
+
+    env = os.environ.copy()
+    env["SSHPASS"] = password
+
+    ssh_cmd = [
+    "sshpass", "-e", "ssh",
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-p", port,
+    f"{user}@{host}",
+]
+
+    if args.ssh_args:
+        ssh_cmd.extend(args.ssh_args)
+
+    try:
+        os.execvpe(ssh_cmd[0], ssh_cmd, env)
+    except FileNotFoundError:
+        print("Error: sshpass not found. Install it with:", file=sys.stderr)
+        print("  Ubuntu/Debian: sudo apt install sshpass", file=sys.stderr)
+        print("  RHEL/Fedora:   sudo dnf install sshpass", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_show_pass(args):
+    """
+    Show the password stored in pass for a given profile.
+    Equivalent to:
+
+        pass show <profile_pass_entry>
+
+    e.g. for profile test-server-prod with pass_entry servers/test-server-prod:
+
+        sshpm show-pass test-server-prod
+
+    is the same as:
+
+        pass show servers/test-server-prod
+    """
+    cfg = load_config()
+    profiles = cfg.get("profiles", {})
+    p = profiles.get(args.name)
+    if not p:
+        print(f"Profile '{args.name}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    pass_entry = p["pass_entry"]
+    try:
+        subprocess.run(["pass", "show", pass_entry], check=True)
+    except subprocess.CalledProcessError:
+        print(f"Error: failed to show pass entry '{pass_entry}'.", file=sys.stderr)
+        print("Make sure it exists or set it with:", file=sys.stderr)
+        print(f"  pass insert {pass_entry}", file=sys.stderr)
+
+
+def cmd_complete(args):
+    """
+    Internal: prints options for shell completion.
+    """
+    cfg = load_config()
+    profiles = cfg.get("profiles", {})
+
+    if args.current == "command":
+        print("\n".join(["add", "update", "connect", "show", "show-pass", "list", "delete"]))
+    elif args.current == "profile":
+        print("\n".join(profiles.keys()))
+
+def cmd_completion(args):
+    """
+    Installs sshpm command-line auto-completion for bash or zsh.
+    Creates ~/.sshpm-completion.bash and updates shell rc file.
+    """
+
+    completion_script = r'''
+# sshpm bash completion
+_sshpm_completions()
+{
+    local cur prev words cword
+    _init_completion || return
+
+    # First arg -> subcommand
+    if [[ $cword -eq 1 ]]; then
+        COMPREPLY=( $(compgen -W "$(sshpm _complete command)" -- "$cur") )
+        return
+    fi
+
+    # Profile-based completion
+    case "${prev}" in
+        connect|update|show|show-pass|delete)
+            COMPREPLY=( $(compgen -W "$(sshpm _complete profile)" -- "$cur") )
+            return
+            ;;
+    esac
+}
+
+complete -F _sshpm_completions sshpm
+'''
+
+    comp_file = Path.home() / ".sshpm-completion.bash"
+
+    # Write the file
+    comp_file.write_text(completion_script)
+    print(f"[OK] Created/updated {comp_file}")
+
+    # Detect shell
+    shell = os.path.basename(os.environ.get("SHELL", "bash"))
+
+    if shell == "bash":
+        rc_file = Path.home() / ".bashrc"
+        source_line = f"source {comp_file}\n"
+    elif shell == "zsh":
+        rc_file = Path.home() / ".zshrc"
+        source_line = f"source {comp_file}\n"
+    else:
+        print(f"[WARN] Unknown shell '{shell}'. Please source {comp_file} manually.")
+        return
+
+    # Add line to rc file if not already included
+    content = rc_file.read_text() if rc_file.exists() else ""
+    if source_line not in content:
+        with rc_file.open("a") as f:
+            f.write("\n# sshpm auto-completion\n")
+            f.write(source_line)
+        print(f"[OK] Added completion source line to {rc_file}")
+    else:
+        print(f"[OK] {rc_file} already contains sshpm completion entry.")
+
+    print("\nTo activate completion now, run:")
+    print(f"  source {rc_file}")
+    print("\nThen enjoy:")
+    print("  sshpm <TAB>")
+    print("  sshpm connect <TAB>")
+
+
+def cmd_self_update(args):
+    import shutil
+    import stat
+    import tempfile
+    import urllib.request
+
+    print(f"Current version: {__version__}")
+    print("Checking for updates...")
+
+    try:
+        tag_url = f"https://api.github.com/repos/{REPO}/releases/latest"
+        req = urllib.request.Request(tag_url, headers={"Accept": "application/vnd.github.v3+json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+            latest = data["tag_name"].lstrip("v")
+    except Exception as e:
+        print(f"Error checking latest version: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if latest == __version__:
+        print(f"Already up to date (v{__version__}).")
+        return
+
+    print(f"New version available: v{latest}")
+
+    sshpm_path = Path(shutil.which("sshpm") or Path.home() / "bin" / "sshpm")
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, dir=sshpm_path.parent, prefix=".sshpm-update-") as tmp:
+            tmp_path = Path(tmp.name)
+            print(f"Downloading v{latest}...")
+            urllib.request.urlretrieve(RELEASE_URL, tmp_path)
+            tmp_path.chmod(tmp_path.stat().st_mode | stat.S_IEXEC)
+            tmp_path.replace(sshpm_path)
+        print(f"Updated to v{latest}.")
+    except Exception as e:
+        print(f"Error updating: {e}", file=sys.stderr)
+        if tmp_path.exists():
+            tmp_path.unlink()
+        sys.exit(1)
+
+
+# ---------- parser ----------
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="sshpm",
+        description="SSH Profile Manager using pass for password storage."
+    )
+    parser.add_argument("--version", action="version", version=f"sshpm {__version__}")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # add
+    p_add = sub.add_parser("add", help="Add a new profile")
+    p_add.add_argument("name", help="Profile name (e.g. myserver)")
+    p_add.add_argument("--host", help="Server IP / hostname")
+    p_add.add_argument("--user", help="SSH username")
+    p_add.add_argument("--port", type=int, help="SSH port (default 22)")
+    p_add.add_argument("--pass-entry", help="`pass` entry name (e.g. servers/myserver)")
+    p_add.add_argument("--password", help="Password to store in pass (auto-creates pass entry)")
+    p_add.set_defaults(func=cmd_add)
+
+    # update
+    p_upd = sub.add_parser("update", help="Update an existing profile")
+    p_upd.add_argument("name", help="Profile name")
+    p_upd.add_argument("--host", help="New host")
+    p_upd.add_argument("--user", help="New user")
+    p_upd.add_argument("--port", type=int, help="New port")
+    p_upd.add_argument("--pass-entry", help="New pass entry name")
+    p_upd.add_argument("--password", help="New password to store in pass (creates/updates entry)")
+    p_upd.set_defaults(func=cmd_update)
+
+    # list
+    p_list = sub.add_parser("list", help="List profiles")
+    p_list.set_defaults(func=cmd_list)
+
+    # show
+    p_show = sub.add_parser("show", help="Show details of a profile")
+    p_show.add_argument("name", help="Profile name")
+    p_show.set_defaults(func=cmd_show)
+
+    # show-pass
+    p_sp = sub.add_parser("show-pass", help="Show password from pass for a profile")
+    p_sp.add_argument("name", help="Profile name")
+    p_sp.set_defaults(func=cmd_show_pass)
+
+    # delete
+    p_del = sub.add_parser("delete", help="Delete a profile (does not touch pass entry)")
+    p_del.add_argument("name", help="Profile name")
+    p_del.set_defaults(func=cmd_delete)
+
+    # connect
+    p_conn = sub.add_parser("connect", help="Connect to a profile via SSH")
+    p_conn.add_argument("name", help="Profile name")
+    p_conn.add_argument(
+        "ssh_args",
+        nargs=argparse.REMAINDER,
+        help="Extra arguments passed to ssh (e.g. -L 8080:localhost:80)",
+    )
+    p_conn.set_defaults(func=cmd_connect)
+
+    # internal completion
+    p_comp = sub.add_parser("_complete", help=argparse.SUPPRESS)
+    p_comp.add_argument("current")
+    p_comp.set_defaults(func=cmd_complete)
+
+    # completion install
+    p_comp_install = sub.add_parser("completion", help="Install shell auto-completion")
+    p_comp_install.add_argument("--install", action="store_true", help="Install completion script")
+    p_comp_install.set_defaults(func=lambda args: cmd_completion(args) if args.install else print("Use: sshpm completion --install"))
+
+    # self-update
+    p_update_self = sub.add_parser("self-update", help="Update sshpm to the latest release")
+    p_update_self.set_defaults(func=cmd_self_update)
+
+    return parser
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
