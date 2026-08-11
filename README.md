@@ -15,17 +15,12 @@ One-liner (latest release):
 mkdir -p ~/bin && curl -sL https://github.com/omryatia/sshpm/releases/latest/download/sshpm -o ~/bin/sshpm && chmod +x ~/bin/sshpm
 ```
 
-Or clone and use install script:
+Or clone and install (auto-installs missing dependencies):
 
 ```bash
 git clone https://github.com/omryatia/sshpm.git
 cd sshpm
-
-# Install sshpm to ~/bin (no deps)
 ./install.sh
-
-# Install sshpm + system dependencies (pass, sshpass, gpg)
-./install.sh --deps
 ```
 
 ## Prerequisites

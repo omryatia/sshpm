@@ -16,28 +16,58 @@ detect_pkg_manager() {
     fi
 }
 
-install_deps() {
+check_and_install_deps() {
+    local missing=()
+
+    command -v pass &>/dev/null   || missing+=("pass")
+    command -v sshpass &>/dev/null || missing+=("sshpass")
+    command -v gpg &>/dev/null    || missing+=("gpg")
+
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        echo "All dependencies found."
+        return
+    fi
+
+    echo "Missing dependencies: ${missing[*]}"
+
     local pkg_mgr
     pkg_mgr=$(detect_pkg_manager)
-
     echo "Detected package manager: ${pkg_mgr}"
+
+    local pkgs=()
+    for dep in "${missing[@]}"; do
+        case "${dep}" in
+            gpg)
+                if [[ "${pkg_mgr}" == "apt" ]]; then
+                    pkgs+=("gpg")
+                else
+                    pkgs+=("gnupg2")
+                fi
+                ;;
+            *)
+                pkgs+=("${dep}")
+                ;;
+        esac
+    done
 
     case "${pkg_mgr}" in
         apt)
             sudo apt update
-            sudo apt install -y pass sshpass gpg
+            sudo apt install -y "${pkgs[@]}"
             ;;
         dnf)
-            sudo dnf install -y pass sshpass gnupg2
+            sudo dnf install -y "${pkgs[@]}"
             ;;
         yum)
-            sudo yum install -y pass sshpass gnupg2
+            sudo yum install -y "${pkgs[@]}"
             ;;
         *)
-            echo "Error: unsupported package manager. Install manually: pass, sshpass, gpg"
+            echo "Error: unsupported package manager. Install manually: ${missing[*]}"
             exit 1
             ;;
     esac
+
+    echo "Dependencies installed."
 }
 
 install_sshpm() {
@@ -67,11 +97,8 @@ ensure_path() {
 echo "=== sshpm installer ==="
 echo ""
 
-if [[ "${1:-}" == "--deps" ]]; then
-    install_deps
-    echo ""
-fi
-
+check_and_install_deps
+echo ""
 install_sshpm
 ensure_path
 
