@@ -140,6 +140,21 @@ What it does:
 - Reads password from pass (servers/test-server-prod)
 - Sets SSHPASS env and runs: sshpass -e ssh user@host -p port
 
+Force password auth (skip keys / agent), e.g. when server rejects after
+"Too many authentication failures":
+
+    # save in profile
+    sshpm add myserver --host 1.2.3.4 --user admin --password '...' --password-only
+    sshpm update myserver --password-only        # enable
+    sshpm update myserver --no-password-only     # disable
+
+    # one-off
+    sshpm connect --password-only myserver
+
+    # any custom ssh -o option (repeatable)
+    sshpm update myserver -o ServerAliveInterval=30 -o Compression=yes
+    sshpm update myserver --clear-options
+
 ----------------------------------------------------
 3.4 List, show profile, show password, delete
 ----------------------------------------------------
@@ -198,6 +213,40 @@ def get_latest_version():
     except Exception:
         return None
 
+PASSWORD_ONLY_OPTIONS = [
+    "IdentitiesOnly=yes",
+    "PubkeyAuthentication=no",
+    "PreferredAuthentications=password",
+]
+
+
+def merge_ssh_options(existing, new):
+    """Merge KEY=VALUE options; later keys override earlier ones (case-insensitive)."""
+    merged = {}
+    for opt in list(existing or []) + list(new or []):
+        if "=" not in opt:
+            print(f"Error: invalid ssh option '{opt}' (expected KEY=VALUE).", file=sys.stderr)
+            sys.exit(1)
+        key = opt.split("=", 1)[0].strip()
+        merged.pop(key.lower(), None)
+        merged[key.lower()] = opt.strip()
+    return list(merged.values())
+
+
+def collect_ssh_options(args, existing=None):
+    opts = list(existing or [])
+    if getattr(args, "clear_options", False):
+        opts = []
+    if getattr(args, "no_password_only", False):
+        keys = {o.split("=", 1)[0].lower() for o in PASSWORD_ONLY_OPTIONS}
+        opts = [o for o in opts if o.split("=", 1)[0].strip().lower() not in keys]
+    extra = []
+    if getattr(args, "password_only", False):
+        extra += PASSWORD_ONLY_OPTIONS
+    extra += getattr(args, "ssh_option", None) or []
+    return merge_ssh_options(opts, extra)
+
+
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "sshpm"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
@@ -247,6 +296,9 @@ def cmd_add(args):
         "port": int(port),
         "pass_entry": pass_entry,
     }
+    ssh_options = collect_ssh_options(args)
+    if ssh_options:
+        profiles[name]["ssh_options"] = ssh_options
     save_config(cfg)
 
     # Insert password into pass if provided
@@ -286,6 +338,12 @@ def cmd_update(args):
     if args.pass_entry:
         p["pass_entry"] = args.pass_entry
 
+    ssh_options = collect_ssh_options(args, p.get("ssh_options"))
+    if ssh_options:
+        p["ssh_options"] = ssh_options
+    else:
+        p.pop("ssh_options", None)
+
     save_config(cfg)
     print(f"Updated profile '{args.name}'")
 
@@ -316,7 +374,10 @@ def cmd_list(args):
         return
     print("Defined profiles:")
     for name, p in profiles.items():
-        print(f"- {name}: {p['user']}@{p['host']}:{p['port']} (pass: {p['pass_entry']})")
+        line = f"- {name}: {p['user']}@{p['host']}:{p['port']} (pass: {p['pass_entry']})"
+        if p.get("ssh_options"):
+            line += f" [opts: {', '.join(p['ssh_options'])}]"
+        print(line)
 
 
 def cmd_show(args):
@@ -371,12 +432,15 @@ def cmd_connect(args):
     env = os.environ.copy()
     env["SSHPASS"] = password
 
-    ssh_cmd = [
-    "sshpass", "-e", "ssh",
-    "-o", "StrictHostKeyChecking=accept-new",
-    "-p", port,
-    f"{user}@{host}",
-]
+    ssh_options = merge_ssh_options(
+        ["StrictHostKeyChecking=accept-new"] + p.get("ssh_options", []),
+        PASSWORD_ONLY_OPTIONS if args.password_only else [],
+    )
+
+    ssh_cmd = ["sshpass", "-e", "ssh"]
+    for opt in ssh_options:
+        ssh_cmd += ["-o", opt]
+    ssh_cmd += ["-p", port, f"{user}@{host}"]
 
     if args.ssh_args:
         ssh_cmd.extend(args.ssh_args)
@@ -556,6 +620,11 @@ def build_parser():
     p_add.add_argument("--port", type=int, help="SSH port (default 22)")
     p_add.add_argument("--pass-entry", help="`pass` entry name (e.g. servers/myserver)")
     p_add.add_argument("--password", help="Password to store in pass (auto-creates pass entry)")
+    p_add.add_argument("--password-only", action="store_true",
+                       help="Force password auth (IdentitiesOnly=yes, PubkeyAuthentication=no, "
+                            "PreferredAuthentications=password)")
+    p_add.add_argument("-o", "--ssh-option", action="append", metavar="KEY=VALUE",
+                       help="Extra ssh -o option to save in profile (repeatable)")
     p_add.set_defaults(func=cmd_add)
 
     # update
@@ -566,6 +635,14 @@ def build_parser():
     p_upd.add_argument("--port", type=int, help="New port")
     p_upd.add_argument("--pass-entry", help="New pass entry name")
     p_upd.add_argument("--password", help="New password to store in pass (creates/updates entry)")
+    p_upd.add_argument("--password-only", action="store_true",
+                       help="Enable forced password auth options")
+    p_upd.add_argument("--no-password-only", action="store_true",
+                       help="Remove forced password auth options")
+    p_upd.add_argument("-o", "--ssh-option", action="append", metavar="KEY=VALUE",
+                       help="Add/override ssh -o option (repeatable)")
+    p_upd.add_argument("--clear-options", action="store_true",
+                       help="Remove all saved ssh options (applied before other option flags)")
     p_upd.set_defaults(func=cmd_update)
 
     # list
@@ -589,6 +666,8 @@ def build_parser():
 
     # connect
     p_conn = sub.add_parser("connect", help="Connect to a profile via SSH")
+    p_conn.add_argument("--password-only", action="store_true",
+                        help="Force password auth for this connection only")
     p_conn.add_argument("name", help="Profile name")
     p_conn.add_argument(
         "ssh_args",

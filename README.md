@@ -60,6 +60,21 @@ sshpm delete myserver
 sshpm completion --install
 ```
 
+### SSH options (optional)
+
+Force password auth (adds `IdentitiesOnly=yes`, `PubkeyAuthentication=no`, `PreferredAuthentications=password`) — useful on "Too many authentication failures":
+
+```bash
+sshpm add myserver --host 1.2.3.4 --user admin --password 'Pass!' --password-only
+sshpm update myserver --password-only      # enable on existing profile
+sshpm update myserver --no-password-only   # disable
+sshpm connect --password-only myserver     # one-off, not saved
+
+# Any custom ssh -o option (repeatable), saved in profile
+sshpm update myserver -o ServerAliveInterval=30 -o Compression=yes
+sshpm update myserver --clear-options
+```
+
 ## How It Works
 
 - Profiles stored in `~/.config/sshpm/config.json`
