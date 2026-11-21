@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0] - 2026-11-21
+
+### Added
+- Optional per-profile ssh `-o` options (`-o/--ssh-option KEY=VALUE`, repeatable) on `add` and `update`
+- `--password-only` flag to force password auth (`IdentitiesOnly=yes`, `PubkeyAuthentication=no`, `PreferredAuthentications=password`) on `add`, `update`, and one-off on `connect`
+- `update --no-password-only` and `update --clear-options`
+- `list` shows saved ssh options
+
 ## [1.0.0] - 2026-08-11
 
 ### Added
